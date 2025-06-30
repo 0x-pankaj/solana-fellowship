@@ -91,74 +91,56 @@ enum TransferResponse {
 
 #[handler]
 async fn send_sol(Json(req): Json<RequestTransferBalance>) -> Result<Json<TransferResponse>> {
-    let client = RpcClient::new(
-        std::env::var("SOLANA_RPC_URL")
-            .unwrap_or_else(|_| "https://api.testnet.solana.com".to_string()),
-    );
+    let client = RpcClient::new("https://api.testnet.solana.com".to_string());
 
     if req.from.is_empty() || req.to.is_empty() {
-        return Ok(Json(TransferResponse::Error {
-            success: false,
-            error: "Missing required fields".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Missing required fields".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     if req.lamports == 0 {
-        return Ok(Json(TransferResponse::Error {
-            success: false,
-            error: "Lamports must be greater than zero".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Lamports must be greater than zero".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     let from_keypair = match bs58::decode(&req.from).into_vec() {
-        Ok(bytes) => match Keypair::from_bytes(&bytes) {
-            Ok(keypair) => keypair,
-            Err(e) => {
-                return Ok(Json(TransferResponse::Error {
-                    success: false,
-                    error: format!("Invalid secret key: {}", e),
-                }));
-            }
-        },
-        Err(e) => {
-            return Ok(Json(TransferResponse::Error {
-                success: false,
-                error: format!("Invalid secret key format: {}", e),
-            }));
+        Ok(bytes) => Keypair::from_bytes(&bytes).map_err(|_| {
+            poem::Error::from_string("Invalid secret key".to_string(), StatusCode::BAD_REQUEST)
+        })?,
+        Err(_) => {
+            return Err(poem::Error::from_string(
+                "Invalid secret key format".to_string(),
+                StatusCode::BAD_REQUEST,
+            ));
         }
     };
 
-    let to_pubkey = match Pubkey::from_str(&req.to) {
-        Ok(pubkey) => pubkey,
-        Err(e) => {
-            return Ok(Json(TransferResponse::Error {
-                success: false,
-                error: format!("Invalid destination: {}", e),
-            }));
-        }
-    };
+    let to_pubkey = Pubkey::from_str(&req.to).map_err(|_| {
+        poem::Error::from_string("Invalid destination".to_string(), StatusCode::BAD_REQUEST)
+    })?;
 
-    let balance = match client.get_balance(&from_keypair.pubkey()) {
-        Ok(balance) => balance,
-        Err(e) => {
-            return Ok(Json(TransferResponse::Error {
-                success: false,
-                error: format!("Failed to get balance: {}", e),
-            }));
-        }
-    };
+    let balance = client.get_balance(&from_keypair.pubkey()).map_err(|e| {
+        poem::Error::from_string(
+            format!("Failed to get balance: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
     if balance < req.lamports {
-        return Ok(Json(TransferResponse::Error {
-            success: false,
-            error: "Insufficient balance".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Insufficient balance".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     if client.get_account(&to_pubkey).is_err() {
-        return Ok(Json(TransferResponse::Error {
-            success: false,
-            error: "Invalid destination account".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Invalid destination account".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     let instruction =
@@ -222,16 +204,13 @@ pub fn create_spl_token_transaction(
     payer: &Pubkey,
     memo: Option<String>,
     _decimals: u8,
-) -> Result<(Vec<Instruction>, Pubkey), String> {
+) -> Result<(Vec<Instruction>, Pubkey), poem::Error> {
     let mut instructions = Vec::new();
 
     let from_ata = get_associated_token_address(from, token_mint);
     let to_ata = get_associated_token_address(to, token_mint);
 
-    let rpc_client = RpcClient::new(
-        std::env::var("SOLANA_RPC_URL")
-            .unwrap_or_else(|_| "https://api.testnet.solana.com".to_string()),
-    );
+    let rpc_client = RpcClient::new("https://api.testnet.solana.com".to_string());
 
     if rpc_client.get_account(&from_ata).is_err() {
         let create_ata_instruction =
@@ -247,7 +226,12 @@ pub fn create_spl_token_transaction(
 
     let transfer_instruction =
         token_instruction::transfer(&spl_token::id(), &from_ata, &to_ata, from, &[], amount)
-            .map_err(|e| format!("Failed to create transfer instruction: {}", e))?;
+            .map_err(|e| {
+                poem::Error::from_string(
+                    format!("Failed to create transfer instruction: {}", e),
+                    StatusCode::BAD_REQUEST,
+                )
+            })?;
     instructions.push(transfer_instruction);
 
     if let Some(memo_text) = memo {
@@ -271,124 +255,102 @@ async fn transfer_spl_token(
             .unwrap_or_else(|_| "https://api.testnet.solana.com".to_string()),
     );
 
+    // Validate inputs
     if req.owner.is_empty() || req.destination.is_empty() || req.mint.is_empty() {
-        return Ok(Json(SPLTransferResponse::Error {
-            success: false,
-            error: "Missing required fields".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Missing required fields".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     if req.amount == 0 {
-        return Ok(Json(SPLTransferResponse::Error {
-            success: false,
-            error: "Amount must be greater than zero".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Amount must be greater than zero".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     let from_keypair = match bs58::decode(&req.owner).into_vec() {
-        Ok(bytes) => match Keypair::from_bytes(&bytes) {
-            Ok(keypair) => keypair,
-            Err(e) => {
-                return Ok(Json(SPLTransferResponse::Error {
-                    success: false,
-                    error: format!("Invalid secret key: {}", e),
-                }));
-            }
-        },
+        Ok(bytes) => Keypair::from_bytes(&bytes).map_err(|e| {
+            poem::Error::from_string(
+                format!("Invalid secret key: {}", e),
+                StatusCode::BAD_REQUEST,
+            )
+        })?,
         Err(e) => {
-            return Ok(Json(SPLTransferResponse::Error {
-                success: false,
-                error: format!("Invalid secret key format: {}", e),
-            }));
+            return Err(poem::Error::from_string(
+                format!("Invalid secret key format: {}", e),
+                StatusCode::BAD_REQUEST,
+            ));
         }
     };
 
-    let to_pubkey = match Pubkey::from_str(&req.destination) {
-        Ok(pubkey) => pubkey,
-        Err(e) => {
-            return Ok(Json(SPLTransferResponse::Error {
-                success: false,
-                error: format!("Invalid destination public key: {}", e),
-            }));
-        }
-    };
+    let to_pubkey = Pubkey::from_str(&req.destination).map_err(|e| {
+        poem::Error::from_string(
+            format!("Invalid destination public key: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
-    let token_mint = match Pubkey::from_str(&req.mint) {
-        Ok(pubkey) => pubkey,
-        Err(e) => {
-            return Ok(Json(SPLTransferResponse::Error {
-                success: false,
-                error: format!("Invalid token mint address: {}", e),
-            }));
-        }
-    };
+    let token_mint = Pubkey::from_str(&req.mint).map_err(|e| {
+        poem::Error::from_string(
+            format!("Invalid token mint address: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     println!("Checking mint: {}", token_mint); // Log mint address
-    let mint_info = match client.get_account(&token_mint) {
-        Ok(account) => account,
-        Err(e) => {
-            println!("Mint fetch error: {}", e); // Log RPC error
-            return Ok(Json(SPLTransferResponse::Error {
-                success: false,
-                error: format!("Token mint not found: {}", e),
-            }));
-        }
-    };
+    let mint_info = client.get_account(&token_mint).map_err(|e| {
+        println!("Mint fetch error: {}", e); // Log RPC error
+        poem::Error::from_string(
+            format!("Token mint not found: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
-    let mint_data = match Mint::unpack(&mint_info.data) {
-        Ok(data) => data,
-        Err(e) => {
-            return Ok(Json(SPLTransferResponse::Error {
-                success: false,
-                error: format!("Failed to parse mint account: {}", e),
-            }));
-        }
-    };
+    let mint_data = Mint::unpack(&mint_info.data).map_err(|e| {
+        poem::Error::from_string(
+            format!("Failed to parse mint account: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
-    let balance = match client.get_balance(&from_keypair.pubkey()) {
-        Ok(balance) => balance,
-        Err(e) => {
-            return Ok(Json(SPLTransferResponse::Error {
-                success: false,
-                error: format!("Failed to get balance: {}", e),
-            }));
-        }
-    };
+    // Check sufficient SOL for ATA creation
+    let balance = client.get_balance(&from_keypair.pubkey()).map_err(|e| {
+        poem::Error::from_string(
+            format!("Failed to get balance: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
     if balance < 2_000_000 {
-        return Ok(Json(SPLTransferResponse::Error {
-            success: false,
-            error: "Insufficient SOL for ATA creation".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Insufficient SOL for ATA creation".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     // Check token balance
     let from_ata = get_associated_token_address(&from_keypair.pubkey(), &token_mint);
-    let token_account = match client.get_account(&from_ata) {
-        Ok(account) => account,
-        Err(e) => {
-            return Ok(Json(SPLTransferResponse::Error {
-                success: false,
-                error: format!("Source token account not found: {}", e),
-            }));
-        }
-    };
-    let token_data = match TokenAccount::unpack(&token_account.data) {
-        Ok(data) => data,
-        Err(e) => {
-            return Ok(Json(SPLTransferResponse::Error {
-                success: false,
-                error: format!("Failed to parse token account: {}", e),
-            }));
-        }
-    };
+    let token_account = client.get_account(&from_ata).map_err(|e| {
+        poem::Error::from_string(
+            format!("Source token account not found: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
+    let token_data = TokenAccount::unpack(&token_account.data).map_err(|e| {
+        poem::Error::from_string(
+            format!("Failed to parse token account: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
     if token_data.amount < req.amount {
-        return Ok(Json(SPLTransferResponse::Error {
-            success: false,
-            error: "Insufficient token balance".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Insufficient token balance".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
-    let (instructions, _payer) = match create_spl_token_transaction(
+    let (instructions, payer) = create_spl_token_transaction(
         req.amount,
         &from_keypair.pubkey(),
         &to_pubkey,
@@ -396,15 +358,13 @@ async fn transfer_spl_token(
         &from_keypair.pubkey(),
         req.memo.clone(),
         mint_data.decimals,
-    ) {
-        Ok(result) => result,
-        Err(e) => {
-            return Ok(Json(SPLTransferResponse::Error {
-                success: false,
-                error: format!("Failed to create transaction: {}", e),
-            }));
-        }
-    };
+    )
+    .map_err(|e| {
+        poem::Error::from_string(
+            format!("Failed to create transaction: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     let primary_ix = instructions
         .iter()
@@ -466,45 +426,39 @@ enum SignMessageResponse {
 #[handler]
 async fn sign_message(Json(req): Json<SignMessageRequest>) -> Result<Json<SignMessageResponse>> {
     if req.message.is_empty() || req.secret.is_empty() {
-        return Ok(Json(SignMessageResponse::Error {
-            success: false,
-            error: "Missing required fields".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Missing required fields".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     if req.message.len() > 1024 {
-        return Ok(Json(SignMessageResponse::Error {
-            success: false,
-            error: "Message too long".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Message too long".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
-    let secret_bytes = match bs58::decode(&req.secret).into_vec() {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return Ok(Json(SignMessageResponse::Error {
-                success: false,
-                error: format!("Invalid base58 secret key: {}", e),
-            }));
-        }
-    };
+    let secret_bytes = bs58::decode(&req.secret).into_vec().map_err(|e| {
+        poem::Error::from_string(
+            format!("Invalid base58 secret key: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     if secret_bytes.len() != 64 {
-        return Ok(Json(SignMessageResponse::Error {
-            success: false,
-            error: "Invalid secret key length".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Invalid secret key length".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
-    let keypair = match Keypair::from_bytes(&secret_bytes) {
-        Ok(keypair) => keypair,
-        Err(e) => {
-            return Ok(Json(SignMessageResponse::Error {
-                success: false,
-                error: format!("Invalid keypair bytes: {}", e),
-            }));
-        }
-    };
+    let keypair = Keypair::from_bytes(&secret_bytes).map_err(|e| {
+        poem::Error::from_string(
+            format!("Invalid keypair bytes: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     let signature = keypair.sign_message(req.message.as_bytes());
 
@@ -551,56 +505,49 @@ async fn verify_message(
     Json(req): Json<VerifyMessageRequest>,
 ) -> Result<Json<VerifyMessageResponse>> {
     if req.message.is_empty() || req.signature.is_empty() || req.pubkey.is_empty() {
-        return Ok(Json(VerifyMessageResponse::Error {
-            success: false,
-            error: "Missing required fields".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Missing required fields".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     if req.message.len() > 1024 {
-        return Ok(Json(VerifyMessageResponse::Error {
-            success: false,
-            error: "Message too long".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Message too long".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
-    let pubkey = match Pubkey::from_str(&req.pubkey) {
-        Ok(pubkey) => pubkey,
-        Err(e) => {
-            return Ok(Json(VerifyMessageResponse::Error {
-                success: false,
-                error: format!("Invalid public key format: {}", e),
-            }));
-        }
-    };
+    let pubkey = Pubkey::from_str(&req.pubkey).map_err(|e| {
+        poem::Error::from_string(
+            format!("Invalid public key format: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
-    let sig_bytes = match general_purpose::STANDARD.decode(&req.signature) {
-        Ok(bytes) => bytes,
-        Err(e) => {
+    let sig_bytes = general_purpose::STANDARD
+        .decode(&req.signature)
+        .map_err(|e| {
             println!("Base64 decode error: {}", e);
-            return Ok(Json(VerifyMessageResponse::Error {
-                success: false,
-                error: format!("Invalid base64 signature: {}", e),
-            }));
-        }
-    };
+            poem::Error::from_string(
+                format!("Invalid base64 signature: {}", e),
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
 
     if sig_bytes.len() != 64 {
-        return Ok(Json(VerifyMessageResponse::Error {
-            success: false,
-            error: "Invalid signature length".to_string(),
-        }));
+        return Err(poem::Error::from_string(
+            "Invalid signature length".to_string(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
-    let signature = match Signature::try_from(sig_bytes.as_slice()) {
-        Ok(sig) => sig,
-        Err(e) => {
-            return Ok(Json(VerifyMessageResponse::Error {
-                success: false,
-                error: format!("Invalid signature bytes: {}", e),
-            }));
-        }
-    };
+    let signature = Signature::try_from(sig_bytes.as_slice()).map_err(|e| {
+        poem::Error::from_string(
+            format!("Invalid signature bytes: {}", e),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     let valid = signature.verify(pubkey.as_ref(), req.message.as_bytes());
     println!("Verification result: {}", valid);
@@ -614,6 +561,7 @@ async fn verify_message(
         },
     }))
 }
+
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
     let app = Route::new()
